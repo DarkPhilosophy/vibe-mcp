@@ -1,0 +1,15 @@
+{
+  "name": "vibe-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server that runs Vibe CLI as a subagent",
+  "main": "index.js",
+  "scripts": {
+    "lint": "node --check index.js",
+    "test": "node --check index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.0"
+  }
+}
