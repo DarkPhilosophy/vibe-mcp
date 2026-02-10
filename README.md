@@ -6,6 +6,7 @@ Run the Mistral Vibe CLI as an MCP subagent from Codex. This server wraps Vibe p
 
 - `vibe_run`: run a new Vibe task
 - `vibe_resume`: resume a project using the last session ID
+- `vibe_manage`: check/install/update the Vibe CLI runtime
 
 ## Requirements
 
@@ -133,6 +134,28 @@ Optional env vars:
 
 - `VIBE_BIN`: override the Vibe binary path
 - `VIBE_MCP_STATE`: override the state file path
+- `VIBE_MCP_AUTO_UPDATE=true`: auto-run update flow before execution
+- `VIBE_INSTALL_SCRIPT_URL`: override installer URL (default: `https://mistral.ai/vibe/install.sh`)
+
+### New runtime options (tool args)
+
+Both `vibe_run` and `vibe_resume` now support:
+
+- `auto_install` (`boolean`): if binary is missing, try install automatically
+- `auto_update` (`boolean`): run update flow before execution
+- `install_method` (`auto|uv|curl`): installation strategy (`auto` tries `uv` then `curl`)
+
+Example:
+
+```json
+{
+  "prompt": "Summarize this repo in 3 bullets.",
+  "project_dir": "$HOME/Projects/cpufetch",
+  "auto_install": true,
+  "auto_update": true,
+  "install_method": "auto"
+}
+```
 
 ## Roadmap ideas
 

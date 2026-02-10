@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,18 +8,21 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const server = new Server(
-  { name: "vibe", version: "0.1.0" },
+  { name: "vibe", version: "0.2.0" },
   { capabilities: { tools: {} } }
 );
 
 const TOOL_RUN = "vibe_run";
 const TOOL_RESUME = "vibe_resume";
+const TOOL_MANAGE = "vibe_manage";
 
 const statePath =
   process.env.VIBE_MCP_STATE ||
   path.join(os.homedir(), ".local/share/mcp-servers/vibe-mcp/state.json");
 
 const sessionDir = path.join(os.homedir(), ".vibe/logs/session");
+const homeLocalBin = path.join(os.homedir(), ".local/bin");
+const DEFAULT_INSTALL_SCRIPT = "https://mistral.ai/vibe/install.sh";
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -66,6 +70,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           vibe_bin: {
             type: "string",
             description: "Override Vibe binary path (default: vibe).",
+          },
+          auto_install: {
+            type: "boolean",
+            description:
+              "If true and Vibe binary is missing, try to install automatically.",
+          },
+          auto_update: {
+            type: "boolean",
+            description:
+              "If true, run Vibe update flow before execution (best effort).",
+          },
+          install_method: {
+            type: "string",
+            enum: ["auto", "uv", "curl"],
+            description:
+              "Installation strategy when auto_install is enabled (default: auto).",
           },
         },
         required: ["prompt"],
@@ -120,19 +140,65 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "Override Vibe binary path (default: vibe).",
           },
+          auto_install: {
+            type: "boolean",
+            description:
+              "If true and Vibe binary is missing, try to install automatically.",
+          },
+          auto_update: {
+            type: "boolean",
+            description:
+              "If true, run Vibe update flow before execution (best effort).",
+          },
+          install_method: {
+            type: "string",
+            enum: ["auto", "uv", "curl"],
+            description:
+              "Installation strategy when auto_install is enabled (default: auto).",
+          },
         },
         required: ["prompt"],
+      },
+    },
+    {
+      name: TOOL_MANAGE,
+      description:
+        "Manage Vibe runtime: status/install/update with auto-detection.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["status", "install", "update"],
+            description: "Operation to perform.",
+          },
+          install_method: {
+            type: "string",
+            enum: ["auto", "uv", "curl"],
+            description: "Install/update strategy (default: auto).",
+          },
+          vibe_bin: {
+            type: "string",
+            description: "Override Vibe binary path for status checks.",
+          },
+        },
+        required: ["action"],
       },
     },
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name !== TOOL_RUN && request.params.name !== TOOL_RESUME) {
+  if (
+    request.params.name !== TOOL_RUN &&
+    request.params.name !== TOOL_RESUME &&
+    request.params.name !== TOOL_MANAGE
+  ) {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
 
   const {
+    action,
     prompt,
     project_dir,
     session_id,
@@ -143,7 +209,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     enabled_tools,
     agent,
     vibe_bin,
+    auto_install = false,
+    auto_update = false,
+    install_method = "auto",
   } = request.params.arguments ?? {};
+
+  if (request.params.name === TOOL_MANAGE) {
+    const manageResult = await runManageAction({
+      action,
+      installMethod: install_method,
+      vibeBin: vibe_bin,
+    });
+    return {
+      content: [{ type: "text", text: manageResult }],
+    };
+  }
 
   if (typeof prompt !== "string" || prompt.trim().length === 0) {
     throw new Error("prompt is required and must be a non-empty string");
@@ -187,16 +267,37 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const env = {
     ...process.env,
+    PATH: `${homeLocalBin}:${process.env.PATH || ""}`,
     NO_COLOR: "1",
     TERM: "dumb",
     FORCE_COLOR: "0",
   };
 
+  if (auto_update || process.env.VIBE_MCP_AUTO_UPDATE === "true") {
+    await ensureVibeAvailable({
+      preferredBin: vibe_bin || process.env.VIBE_BIN || "vibe",
+      installMethod: install_method,
+      allowInstall: false,
+      allowUpdate: true,
+      cwd: projectDir,
+      env,
+    });
+  }
+
+  const resolvedVibeBin = await ensureVibeAvailable({
+    preferredBin: vibe_bin || process.env.VIBE_BIN || "vibe",
+    installMethod: install_method,
+    allowInstall: Boolean(auto_install),
+    allowUpdate: false,
+    cwd: projectDir,
+    env,
+  });
+
   const startMs = Date.now();
   const beforeFiles = listSessionFiles();
 
   const result = await runCommand({
-    command: vibe_bin || process.env.VIBE_BIN || "vibe",
+    command: resolvedVibeBin,
     args,
     cwd: projectDir,
     stdin,
@@ -380,6 +481,169 @@ function runCommand({ command, args, cwd, stdin, timeoutMs, env }) {
     }
     child.stdin.end();
   });
+}
+
+function which(bin, env = process.env) {
+  const candidate = bin && String(bin).trim();
+  if (!candidate) return null;
+  if (candidate.includes("/") && fs.existsSync(candidate)) {
+    return candidate;
+  }
+  const r = spawnSync("bash", ["-lc", `command -v ${shellEscape(candidate)}`], {
+    env: {
+      ...env,
+      PATH: `${homeLocalBin}:${env.PATH || ""}`,
+    },
+    encoding: "utf8",
+  });
+  if (r.status === 0) {
+    return r.stdout.trim() || null;
+  }
+  return null;
+}
+
+function shellEscape(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function pickVibeBinary(preferredBin, env = process.env) {
+  return (
+    which(preferredBin, env) ||
+    which(process.env.VIBE_BIN, env) ||
+    which("vibe", env) ||
+    which("mistral-vibe", env)
+  );
+}
+
+async function runShellScript({ script, cwd, env, timeoutMs = 240_000 }) {
+  return runCommand({
+    command: "bash",
+    args: ["-lc", script],
+    cwd,
+    stdin: "",
+    timeoutMs,
+    env,
+  });
+}
+
+async function installVibe({ installMethod, cwd, env }) {
+  const method = (installMethod || "auto").toLowerCase();
+  const attempts = method === "auto" ? ["uv", "curl"] : [method];
+  const errors = [];
+
+  for (const m of attempts) {
+    if (m === "uv") {
+      if (!which("uv", env)) {
+        errors.push("uv not found");
+        continue;
+      }
+      const uvCmds = [
+        "uv tool install mistral-vibe",
+        "uv tool install --upgrade mistral-vibe",
+      ];
+      let ok = false;
+      for (const cmd of uvCmds) {
+        const r = await runShellScript({ script: cmd, cwd, env });
+        if (r.code === 0) {
+          ok = true;
+          break;
+        }
+        errors.push(`uv failed: ${r.stderr || r.stdout}`.trim());
+      }
+      if (ok) return;
+      continue;
+    }
+
+    if (m === "curl") {
+      const scriptUrl = process.env.VIBE_INSTALL_SCRIPT_URL || DEFAULT_INSTALL_SCRIPT;
+      const r = await runShellScript({
+        script: `curl -LsSf ${shellEscape(scriptUrl)} | bash`,
+        cwd,
+        env,
+      });
+      if (r.code === 0) return;
+      errors.push(`curl install failed: ${r.stderr || r.stdout}`.trim());
+      continue;
+    }
+
+    errors.push(`unsupported install method: ${m}`);
+  }
+
+  throw new Error(`Vibe install failed. ${errors.join(" | ")}`.trim());
+}
+
+async function updateVibe({ installMethod, cwd, env }) {
+  // Vibe doesn't expose an official "vibe update" subcommand in current CLI.
+  // Re-running installer is the safest universal update path.
+  await installVibe({ installMethod, cwd, env });
+}
+
+async function ensureVibeAvailable({
+  preferredBin,
+  installMethod,
+  allowInstall,
+  allowUpdate,
+  cwd,
+  env,
+}) {
+  let resolved = pickVibeBinary(preferredBin, env);
+  if (allowUpdate) {
+    await updateVibe({ installMethod, cwd, env });
+    resolved = pickVibeBinary(preferredBin, env);
+  }
+
+  if (!resolved && allowInstall) {
+    await installVibe({ installMethod, cwd, env });
+    resolved = pickVibeBinary(preferredBin, env);
+  }
+
+  if (!resolved) {
+    throw new Error(
+      [
+        "Vibe binary not found.",
+        "Install options:",
+        "1) curl -LsSf https://mistral.ai/vibe/install.sh | bash",
+        "2) uv tool install mistral-vibe",
+        "Or pass vibe_bin explicitly.",
+      ].join(" ")
+    );
+  }
+
+  return resolved;
+}
+
+async function runManageAction({ action, installMethod, vibeBin }) {
+  const env = {
+    ...process.env,
+    PATH: `${homeLocalBin}:${process.env.PATH || ""}`,
+  };
+  const cwd = process.cwd();
+  const act = String(action || "").toLowerCase();
+  if (!["status", "install", "update"].includes(act)) {
+    throw new Error("action must be one of: status, install, update");
+  }
+
+  if (act === "install") {
+    await installVibe({ installMethod, cwd, env });
+  } else if (act === "update") {
+    await updateVibe({ installMethod, cwd, env });
+  }
+
+  const resolved = pickVibeBinary(vibeBin || process.env.VIBE_BIN || "vibe", env);
+  if (!resolved) {
+    return "vibe status: missing";
+  }
+
+  const versionResult = await runCommand({
+    command: resolved,
+    args: ["--version"],
+    cwd,
+    stdin: "",
+    timeoutMs: 30_000,
+    env,
+  });
+  const versionText = (versionResult.stdout || versionResult.stderr || "").trim();
+  return `vibe status: ok\nbinary: ${resolved}\nversion: ${versionText || "unknown"}`;
 }
 
 function computeMonthlyCost() {
