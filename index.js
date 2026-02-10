@@ -8,7 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const server = new Server(
-  { name: "vibe", version: "0.2.0" },
+  { name: "vibe", version: "0.2.1" },
   { capabilities: { tools: {} } }
 );
 
@@ -22,7 +22,7 @@ const statePath =
 
 const sessionDir = path.join(os.homedir(), ".vibe/logs/session");
 const homeLocalBin = path.join(os.homedir(), ".local/bin");
-const DEFAULT_INSTALL_SCRIPT = "https://mistral.ai/vibe/install.sh";
+const homeCargoBin = path.join(os.homedir(), ".cargo/bin");
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -83,9 +83,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           install_method: {
             type: "string",
-            enum: ["auto", "uv", "curl"],
+            enum: ["auto", "uv"],
             description:
-              "Installation strategy when auto_install is enabled (default: auto).",
+              "Installation strategy when auto_install is enabled (default: auto; uv-only).",
           },
         },
         required: ["prompt"],
@@ -152,9 +152,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           install_method: {
             type: "string",
-            enum: ["auto", "uv", "curl"],
+            enum: ["auto", "uv"],
             description:
-              "Installation strategy when auto_install is enabled (default: auto).",
+              "Installation strategy when auto_install is enabled (default: auto; uv-only).",
           },
         },
         required: ["prompt"],
@@ -174,8 +174,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           install_method: {
             type: "string",
-            enum: ["auto", "uv", "curl"],
-            description: "Install/update strategy (default: auto).",
+            enum: ["auto", "uv"],
+            description: "Install/update strategy (default: auto; uv-only).",
           },
           vibe_bin: {
             type: "string",
@@ -267,7 +267,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const env = {
     ...process.env,
-    PATH: `${homeLocalBin}:${process.env.PATH || ""}`,
+    PATH: `${homeLocalBin}:${homeCargoBin}:${process.env.PATH || ""}`,
     NO_COLOR: "1",
     TERM: "dumb",
     FORCE_COLOR: "0",
@@ -492,7 +492,7 @@ function which(bin, env = process.env) {
   const r = spawnSync("bash", ["-lc", `command -v ${shellEscape(candidate)}`], {
     env: {
       ...env,
-      PATH: `${homeLocalBin}:${env.PATH || ""}`,
+      PATH: `${homeLocalBin}:${homeCargoBin}:${env.PATH || ""}`,
     },
     encoding: "utf8",
   });
@@ -528,13 +528,14 @@ async function runShellScript({ script, cwd, env, timeoutMs = 240_000 }) {
 
 async function installVibe({ installMethod, cwd, env }) {
   const method = (installMethod || "auto").toLowerCase();
-  const attempts = method === "auto" ? ["uv", "curl"] : [method];
+  const attempts = method === "auto" ? ["uv"] : [method];
   const errors = [];
 
   for (const m of attempts) {
     if (m === "uv") {
-      if (!which("uv", env)) {
-        errors.push("uv not found");
+      const uvReady = await ensureUvInstalled({ cwd, env });
+      if (!uvReady) {
+        errors.push("uv not found and auto-bootstrap failed");
         continue;
       }
       const uvCmds = [
@@ -554,18 +555,6 @@ async function installVibe({ installMethod, cwd, env }) {
       continue;
     }
 
-    if (m === "curl") {
-      const scriptUrl = process.env.VIBE_INSTALL_SCRIPT_URL || DEFAULT_INSTALL_SCRIPT;
-      const r = await runShellScript({
-        script: `curl -LsSf ${shellEscape(scriptUrl)} | bash`,
-        cwd,
-        env,
-      });
-      if (r.code === 0) return;
-      errors.push(`curl install failed: ${r.stderr || r.stdout}`.trim());
-      continue;
-    }
-
     errors.push(`unsupported install method: ${m}`);
   }
 
@@ -574,8 +563,29 @@ async function installVibe({ installMethod, cwd, env }) {
 
 async function updateVibe({ installMethod, cwd, env }) {
   // Vibe doesn't expose an official "vibe update" subcommand in current CLI.
-  // Re-running installer is the safest universal update path.
+  // Re-running uv tool install/upgrade is the safest universal update path.
   await installVibe({ installMethod, cwd, env });
+}
+
+async function ensureUvInstalled({ cwd, env }) {
+  if (which("uv", env)) {
+    return true;
+  }
+  if (!which("curl", env)) {
+    return false;
+  }
+
+  const r = await runShellScript({
+    script: "curl -LsSf https://astral.sh/uv/install.sh | sh",
+    cwd,
+    env,
+  });
+
+  if (r.code !== 0) {
+    return false;
+  }
+
+  return Boolean(which("uv", env));
 }
 
 async function ensureVibeAvailable({
@@ -602,8 +612,8 @@ async function ensureVibeAvailable({
       [
         "Vibe binary not found.",
         "Install options:",
-        "1) curl -LsSf https://mistral.ai/vibe/install.sh | bash",
-        "2) uv tool install mistral-vibe",
+        "1) curl -LsSf https://astral.sh/uv/install.sh | sh",
+        "2) uv tool install --upgrade mistral-vibe",
         "Or pass vibe_bin explicitly.",
       ].join(" ")
     );
@@ -615,7 +625,7 @@ async function ensureVibeAvailable({
 async function runManageAction({ action, installMethod, vibeBin }) {
   const env = {
     ...process.env,
-    PATH: `${homeLocalBin}:${process.env.PATH || ""}`,
+    PATH: `${homeLocalBin}:${homeCargoBin}:${process.env.PATH || ""}`,
   };
   const cwd = process.cwd();
   const act = String(action || "").toLowerCase();

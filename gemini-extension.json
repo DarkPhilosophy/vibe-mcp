@@ -1,6 +1,6 @@
 {
   "name": "vibe",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "repository": "https://github.com/DarkPhilosophy/vibe-mcp",
   "description": "Vibe CLI programmed mode extension",
   "mcpServers": {

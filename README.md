@@ -16,7 +16,14 @@ Run the Mistral Vibe CLI as an MCP subagent from Codex. This server wraps Vibe p
 Install Vibe:
 
 ```bash
-curl -LsSf https://mistral.ai/vibe/install.sh | bash
+uv tool install --upgrade mistral-vibe
+```
+
+If `uv` is missing:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install --upgrade mistral-vibe
 ```
 
 ## Install
@@ -135,7 +142,6 @@ Optional env vars:
 - `VIBE_BIN`: override the Vibe binary path
 - `VIBE_MCP_STATE`: override the state file path
 - `VIBE_MCP_AUTO_UPDATE=true`: auto-run update flow before execution
-- `VIBE_INSTALL_SCRIPT_URL`: override installer URL (default: `https://mistral.ai/vibe/install.sh`)
 
 ### New runtime options (tool args)
 
@@ -143,7 +149,7 @@ Both `vibe_run` and `vibe_resume` now support:
 
 - `auto_install` (`boolean`): if binary is missing, try install automatically
 - `auto_update` (`boolean`): run update flow before execution
-- `install_method` (`auto|uv|curl`): installation strategy (`auto` tries `uv` then `curl`)
+- `install_method` (`auto|uv`): installation strategy (`auto` is `uv`-only)
 
 Example:
 
